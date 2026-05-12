@@ -1,0 +1,11 @@
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.32
+sqlalchemy[asyncio]>=2.0
+aiomysql>=0.2
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7
+python-multipart>=0.0.12
+pydantic[email]>=2.5
+pydantic-settings>=2.2
+alembic>=1.13
+pillow>=10.0
