@@ -9,7 +9,7 @@ from app.core.config import get_settings
 settings = get_settings()
 
 # 密码哈希上下文
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt_sha256", "bcrypt"], deprecated="auto")
 
 
 def hash_password(password: str) -> str:
