@@ -83,13 +83,12 @@ def store_code(code: str) -> str:
     return key
 
 
-def verify_code(key: str, code: str) -> bool:
-    """验证验证码，成功返回 True 并删除"""
-    _clean_expired()
+def verify_code(key: str, user_input: str) -> bool:
+    """校验验证码，无论成功与否都删除该 key（一次性使用）"""
     entry = _store.pop(key, None)
     if entry is None:
         return False
-    stored_code, expire = entry
+    code, expire = entry
     if time.time() > expire:
         return False
-    return stored_code == code.lower().strip()
+    return code == user_input.lower().strip()
