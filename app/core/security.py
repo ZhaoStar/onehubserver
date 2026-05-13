@@ -1,25 +1,26 @@
+import hashlib
+import base64
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from app.core.config import get_settings
 
 settings = get_settings()
 
-# 密码哈希上下文
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _truncate_password(password: str) -> bytes:
+    return base64.b64encode(hashlib.sha256(password.encode()).digest())
 
 
 def hash_password(password: str) -> str:
-    """明文 → 哈希"""
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(_truncate_password(password), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """校验密码"""
-    return pwd_context.verify(plain_password, hashed_password)
+    return bcrypt.checkpw(_truncate_password(plain_password), hashed_password.encode())
 
 
 def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
