@@ -15,6 +15,7 @@ from app.schemas.conversion import (
 from app.services.conversion import (
     convert_video_to_mp3,
     ConversionError,
+    create_conversion_task,
     _get_input_dir,
     _get_output_dir,
     get_duration,
@@ -85,21 +86,18 @@ async def create_conversion(
     output_path = os.path.join(str(output_dir), output_name)
 
     # 4. 创建任务记录
-    task = ConversionTask(
+    task = await create_conversion_task(
+        db=db,
         user_id=current_user.id,
-        original_filename=file.filename or "unknown",
-        original_format=ext,
+        filename=file.filename or "unknown",
+        ext=ext,
         file_size=file_size,
-        status="pending",
         input_path=input_path,
         output_path=output_path,
         bitrate=bitrate,
         sample_rate=sample_rate,
         channels=channels,
     )
-    db.add(task)
-    await db.flush()
-    await db.refresh(task)
     task_id = task.id
 
     # 5. 提交数据库

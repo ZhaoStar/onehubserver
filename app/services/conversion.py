@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from app.core.config import get_settings
+from app.models.conversion import ConversionTask
 
 settings = get_settings()
 
@@ -171,3 +172,34 @@ def get_duration(input_path: str) -> float | None:
         return _parse_duration(result.stderr)
     except Exception:
         return None
+
+
+async def create_conversion_task(
+    db,
+    user_id: int,
+    filename: str,
+    ext: str,
+    file_size: int,
+    input_path: str,
+    output_path: str,
+    bitrate: str = "192k",
+    sample_rate: int = 44100,
+    channels: int = 2,
+) -> ConversionTask:
+    """创建转换任务记录（供 upload 和 convert 路由共用）"""
+    task = ConversionTask(
+        user_id=user_id,
+        original_filename=filename,
+        original_format=ext,
+        file_size=file_size,
+        status="pending",
+        input_path=input_path,
+        output_path=output_path,
+        bitrate=bitrate,
+        sample_rate=sample_rate,
+        channels=channels,
+    )
+    db.add(task)
+    await db.flush()
+    await db.refresh(task)
+    return task

@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     # 默认声道数（1=单声道, 2=立体声）
     DEFAULT_AUDIO_CHANNELS: int = 2
 
+    # —————— 分块上传配置 ——————
+    # 单个分块最大大小（MB），需与 nginx client_max_body_size 保持一致
+    MAX_CHUNK_SIZE_MB: int = 10
+    # 单个上传最大分块数（防止滥用）
+    MAX_CHUNK_COUNT: int = 500
+    # 上传会话超时时间（分钟）
+    UPLOAD_SESSION_TTL_MINUTES: int = 60
+    # 后台清理任务间隔（分钟）
+    UPLOAD_CLEANUP_INTERVAL_MINUTES: int = 30
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

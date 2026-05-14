@@ -1,5 +1,6 @@
 import logging
 import sys
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -54,8 +55,26 @@ async def lifespan(app: FastAPI):
     if settings.DEBUG:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+
+    # 启动分块上传后台清理任务
+    from app.services.chunk_upload import get_chunk_manager, run_cleanup_loop
+    manager = get_chunk_manager()
+    cleanup_task = asyncio.create_task(
+        run_cleanup_loop(
+            manager,
+            interval_sec=settings.UPLOAD_CLEANUP_INTERVAL_MINUTES * 60,
+            ttl_sec=settings.UPLOAD_SESSION_TTL_MINUTES * 60,
+        )
+    )
+
     yield
-    # 关闭时：释放连接池
+
+    # 关闭时：停止清理任务 + 释放连接池
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     await engine.dispose()
 
 
