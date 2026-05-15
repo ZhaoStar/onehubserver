@@ -36,7 +36,13 @@ class UserService:
 
     @staticmethod
     async def create_user(
-        db: AsyncSession, username: str, email: str, password: str, nickname: str | None = None
+        db: AsyncSession,
+        username: str,
+        email: str,
+        password: str,
+        nickname: str | None = None,
+        is_active: bool = False,
+        is_superuser: bool = False,
     ) -> User:
         user = User(
             id=await UserService._generate_unique_id(db),
@@ -44,7 +50,22 @@ class UserService:
             email=email,
             hashed_password=hash_password(password),
             nickname=nickname,
+            is_active=is_active,
+            is_superuser=is_superuser,
         )
+        db.add(user)
+        await db.flush()
+        await db.refresh(user)
+        return user
+
+    @staticmethod
+    async def update_user(db: AsyncSession, user: User, **values) -> User:
+        """更新用户字段；password 会转换为 hashed_password。"""
+        password = values.pop("password", None)
+        for field, value in values.items():
+            setattr(user, field, value)
+        if password is not None:
+            user.hashed_password = hash_password(password)
         db.add(user)
         await db.flush()
         await db.refresh(user)

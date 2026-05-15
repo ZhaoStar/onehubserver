@@ -25,6 +25,26 @@ class CaptchaOut(BaseModel):
     pass
 
 
+class UserCreate(BaseModel):
+    """管理员创建用户请求"""
+    username: str = Field(..., min_length=3, max_length=64, examples=["zhangsan"])
+    email: EmailStr = Field(..., examples=["zhangsan@example.com"])
+    password: str = Field(..., min_length=6, max_length=128, examples=["abc123"])
+    nickname: str | None = Field(default=None, max_length=64)
+    is_active: bool = True
+    is_superuser: bool = False
+
+
+class UserUpdate(BaseModel):
+    """管理员更新用户请求"""
+    username: str | None = Field(default=None, min_length=3, max_length=64)
+    email: EmailStr | None = None
+    password: str | None = Field(default=None, min_length=6, max_length=128)
+    nickname: str | None = Field(default=None, max_length=64)
+    is_active: bool | None = None
+    is_superuser: bool | None = None
+
+
 # ---------- 响应 ----------
 
 class UserPublic(BaseModel):
@@ -52,3 +72,9 @@ class LoginResponse(BaseModel):
     """登录成功响应"""
     token: Token
     user: UserPublic
+
+
+class UserListOut(BaseModel):
+    """用户列表响应"""
+    total: int
+    items: list[UserPublic]
