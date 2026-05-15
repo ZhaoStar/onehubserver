@@ -30,12 +30,24 @@ def _get_output_dir() -> Path:
     return _ensure_dir(os.path.join(settings.UPLOAD_DIR, "mp3"))
 
 
-async def _read_stream(stream: asyncio.StreamReader | None) -> str:
-    """读取 asyncio 子进程的流"""
+async def _collect_stderr(
+    stream: asyncio.StreamReader | None,
+    state: dict[str, float | None],
+) -> str:
+    """持续消费 stderr，避免 ffmpeg 管道写满后阻塞。"""
     if stream is None:
         return ""
-    data = await stream.read()
-    return data.decode("utf-8", errors="replace")
+
+    chunks: list[str] = []
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        text = line.decode("utf-8", errors="replace")
+        chunks.append(text)
+        if state["duration"] is None:
+            state["duration"] = _parse_duration(text)
+    return "".join(chunks)
 
 
 def _parse_duration(stderr_text: str) -> float | None:
@@ -92,32 +104,22 @@ async def convert_video_to_mp3(
         output_path,
     ]
 
-    # 跨平台: Windows 上需要设置 CREATE_NO_WINDOW 防止弹出控制台窗口
-    creationflags = 0
+    # 跨平台: Windows 上需要设置 CREATE_NO_WINDOW 防止弹出控制台窗口。
+    # asyncio 的 Unix 子进程实现不支持 creationflags，不能传 None/0。
+    subprocess_kwargs = {}
     if os.name == "nt":
-        creationflags = getattr(asyncio.subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess_kwargs["creationflags"] = getattr(asyncio.subprocess, "CREATE_NO_WINDOW", 0)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        creationflags=creationflags if creationflags else None,
+        **subprocess_kwargs,
     )
 
-    # 先读取 stderr 获取视频总时长
-    stderr_full = ""
-    duration: float | None = None
-
-    while True:
-        if proc.stderr is None:
-            break
-        line = await proc.stderr.readline()
-        if not line:
-            break
-        text = line.decode("utf-8", errors="replace")
-        stderr_full += text
-        if duration is None:
-            duration = _parse_duration(text)
+    # stdout/stderr 必须并发消费，否则 ffmpeg 任一管道写满都会卡住。
+    state: dict[str, float | None] = {"duration": None}
+    stderr_task = asyncio.create_task(_collect_stderr(proc.stderr, state))
 
     # 读取 stdout 进度
     while True:
@@ -131,17 +133,16 @@ async def convert_video_to_mp3(
         # ffmpeg -progress 输出格式:
         # out_time_ms=123456789
         match = re.search(r"out_time_ms=(\d+)", text)
+        duration = state["duration"]
         if match and duration:
             current_ms = int(match.group(1)) / 1_000_000
             pct = min(round(current_ms / duration * 100, 1), 99.9)
             yield pct
 
     await proc.wait()
+    stderr_full = await stderr_task
 
     if proc.returncode != 0:
-        # 收集剩余 stderr
-        remaining = await _read_stream(proc.stderr)
-        stderr_full += remaining
         raise ConversionError(
             f"FFmpeg 返回码 {proc.returncode}: {stderr_full[-500:]}"
         )
@@ -156,9 +157,9 @@ def get_duration(input_path: str) -> float | None:
     import subprocess
     ffmpeg = settings.get_ffmpeg_path()
 
-    creationflags = 0
+    subprocess_kwargs = {}
     if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
     try:
         result = subprocess.run(
@@ -166,8 +167,8 @@ def get_duration(input_path: str) -> float | None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
-            creationflags=creationflags if creationflags else 0,
             timeout=30,
+            **subprocess_kwargs,
         )
         return _parse_duration(result.stderr)
     except Exception:

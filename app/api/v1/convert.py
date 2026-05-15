@@ -1,7 +1,7 @@
 import os
 import uuid
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Response, status
 from fastapi.responses import FileResponse
 from fastapi.background import BackgroundTasks
 from sqlalchemy import select, func
@@ -33,6 +33,18 @@ ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "flv", "wmv", "webm", "m4v", "
 def _get_ext(filename: str) -> str:
     """Get lowercase extension without dot, e.g. 'mp4'"""
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def _remove_file_if_exists(path: str | None) -> None:
+    """尽力删除任务关联文件，不让文件系统异常影响接口主流程。"""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
 
 
 @router.post("/", response_model=ConversionTaskOut, status_code=status.HTTP_201_CREATED)
@@ -152,6 +164,9 @@ async def _run_conversion(
             )
             await db.commit()
 
+            # 转换成功后不再保留源视频；删除失败不影响已完成任务。
+            _remove_file_if_exists(input_path)
+
         except ConversionError as e:
             await db.execute(
                 update(ConversionTask)
@@ -211,6 +226,38 @@ async def get_task(
     if task is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
     return task
+
+
+@router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_task(
+    db: DBSession,
+    current_user: CurrentUser,
+    task_id: int,
+):
+    """删除我的转换任务（支持已完成和失败任务）"""
+    stmt = select(ConversionTask).where(
+        ConversionTask.id == task_id,
+        ConversionTask.user_id == current_user.id,
+    )
+    result = await db.execute(stmt)
+    task = result.scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+    if task.status in {"pending", "processing"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"任务仍在处理中，当前状态: {task.status}",
+        )
+
+    input_path = task.input_path
+    output_path = task.output_path
+    await db.delete(task)
+    await db.commit()
+
+    _remove_file_if_exists(input_path)
+    _remove_file_if_exists(output_path)
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/download/{task_id}")
