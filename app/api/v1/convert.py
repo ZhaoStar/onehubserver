@@ -210,6 +210,33 @@ async def list_tasks(
     return ConversionTaskListOut(total=total, items=[ConversionTaskOut.model_validate(t) for t in items])
 
 
+@router.delete("/tasks")
+async def clear_tasks(
+    db: DBSession,
+    current_user: CurrentUser,
+):
+    """清空我的转换任务列表"""
+    stmt = select(ConversionTask).where(ConversionTask.user_id == current_user.id)
+    result = await db.execute(stmt)
+    tasks = result.scalars().all()
+
+    file_paths = [
+        path
+        for task in tasks
+        for path in (task.input_path, task.output_path)
+        if path
+    ]
+
+    for task in tasks:
+        await db.delete(task)
+    await db.commit()
+
+    for path in file_paths:
+        _remove_file_if_exists(path)
+
+    return {"deleted": len(tasks)}
+
+
 @router.get("/tasks/{task_id}", response_model=ConversionTaskOut)
 async def get_task(
     db: DBSession,
