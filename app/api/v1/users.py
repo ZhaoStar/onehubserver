@@ -147,6 +147,8 @@ async def delete_user(
     user = await UserService.get_by_id(db, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    if user.username == "stark":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="stark 用户不允许删除")
 
     result = await db.execute(select(ConversionTask).where(ConversionTask.user_id == user.id))
     tasks = result.scalars().all()
