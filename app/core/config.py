@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # 后台清理任务间隔（分钟）
     UPLOAD_CLEANUP_INTERVAL_MINUTES: int = 30
 
+    # —————— 抖音/TikTok/Bilibili API 配置 ——————
+    DOUYIN_API_ENABLE: bool = True
+    PYWEBIO_ENABLE: bool = True
+    DOUYIN_CONFIG_PATH: str = "config.yaml"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

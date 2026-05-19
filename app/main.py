@@ -1,11 +1,14 @@
 import logging
 import sys
+import os
 import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+import yaml
 
 from app.core.config import get_settings
 from app.core.database import engine
@@ -47,6 +50,27 @@ root_logger.addHandler(error_handler)
 
 logger = logging.getLogger("onehub")
 
+# ========== 加载 Douyin API 配置和 Swagger 标签 ==========
+douyin_api_tags = []
+if settings.DOUYIN_API_ENABLE:
+    try:
+        douyin_config_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), settings.DOUYIN_CONFIG_PATH
+        )
+        with open(douyin_config_path, "r", encoding="utf-8") as f:
+            douyin_config = yaml.safe_load(f)
+        douyin_api_tags = [
+            {"name": "Hybrid-API", "description": "混合数据接口/Hybrid-API data endpoints"},
+            {"name": "Douyin-Web-API", "description": "抖音Web数据接口/Douyin-Web-API data endpoints"},
+            {"name": "TikTok-Web-API", "description": "TikTok-Web-API数据接口/TikTok-Web-API data endpoints"},
+            {"name": "TikTok-App-API", "description": "TikTok-App-API数据接口/TikTok-App-API data endpoints"},
+            {"name": "Bilibili-Web-API", "description": "Bilibili-Web-API数据接口/Bilibili-Web-API data endpoints"},
+            {"name": "iOS-Shortcut", "description": "iOS快捷指令数据接口/iOS-Shortcut data endpoints"},
+            {"name": "Download", "description": "下载数据接口/Download data endpoints"},
+        ]
+    except Exception:
+        logger.warning("加载 Douyin 配置文件失败，将跳过 Douyin API 标签")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -80,11 +104,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.APP_NAME,
-    description="OneHub 后端服务",
-    version="0.1.0",
+    description="OneHub 后端服务 · 集成 Douyin/TikTok/Bilibili 数据接口",
+    version="0.2.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
+    openapi_tags=douyin_api_tags if douyin_api_tags else None,
 )
 
 # CORS 中间件
@@ -125,7 +150,29 @@ async def health_check():
     return {"status": "ok"}
 
 
-# 注册路由
+# 注册原有路由
 from app.api.v1.router import router as v1_router
 
 app.include_router(v1_router)
+
+# ========== 注册 Douyin/TikTok/Bilibili API 路由 ==========
+if settings.DOUYIN_API_ENABLE:
+    try:
+        from app.douyin_api.router import router as douyin_router
+
+        app.include_router(douyin_router, prefix="/api")
+        logger.info("Douyin/TikTok/Bilibili API 路由已加载")
+    except Exception:
+        logger.exception("加载 Douyin API 路由失败")
+
+    # PyWebIO 网页前端
+    if settings.PYWEBIO_ENABLE:
+        try:
+            from app.douyin_api.web.app import MainView
+            from pywebio.platform.fastapi import asgi_app
+
+            webapp = asgi_app(lambda: MainView().main_view())
+            app.mount("/douyin", webapp)
+            logger.info("PyWebIO 前端已挂载到 /douyin")
+        except Exception:
+            logger.exception("加载 PyWebIO 前端失败，请检查 pywebio 依赖")
