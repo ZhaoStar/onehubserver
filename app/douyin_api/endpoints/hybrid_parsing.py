@@ -12,6 +12,19 @@ HybridCrawler = HybridCrawler()  # 实例化混合爬虫
 router = APIRouter()
 
 
+async def parse_with_retry(url: str, minimal: bool, retries: int = 2, delay_sec: float = 0.6):
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            return await HybridCrawler.hybrid_parsing_single_video(url=url, minimal=minimal)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= retries:
+                raise
+            await asyncio.sleep(delay_sec)
+    raise last_error
+
+
 @router.get("/video_data", response_model=ResponseModel, tags=["Hybrid-API"],
             summary="混合解析单一视频接口/Hybrid parsing single video endpoint")
 async def hybrid_parsing_single_video(request: Request,
@@ -39,7 +52,7 @@ async def hybrid_parsing_single_video(request: Request,
     """
     try:
         # 解析视频/Parse video
-        data = await HybridCrawler.hybrid_parsing_single_video(url=url, minimal=minimal)
+        data = await parse_with_retry(url=url, minimal=minimal)
         # 返回数据/Return data
         return ResponseModel(code=200,
                              router=request.url.path,
@@ -47,6 +60,7 @@ async def hybrid_parsing_single_video(request: Request,
     except Exception as e:
         status_code = 400
         detail = ErrorResponseModel(code=status_code,
+                                    message=str(e),
                                     router=request.url.path,
                                     params=dict(request.query_params),
                                     )
