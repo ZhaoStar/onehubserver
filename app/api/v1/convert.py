@@ -19,6 +19,8 @@ from app.services.conversion import (
     _get_input_dir,
     _get_output_dir,
     get_duration,
+    remove_file_if_exists,
+    validate_clip_range,
 )
 from app.core.config import get_settings
 
@@ -35,18 +37,6 @@ def _get_ext(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
-def _remove_file_if_exists(path: str | None) -> None:
-    """尽力删除任务关联文件，不让文件系统异常影响接口主流程。"""
-    if not path:
-        return
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        pass
-
-
 @router.post("/", response_model=ConversionTaskOut, status_code=status.HTTP_201_CREATED)
 async def create_conversion(
     db: DBSession,
@@ -56,6 +46,8 @@ async def create_conversion(
     bitrate: str = Form(default="192k", pattern=r"^\d+k$"),
     sample_rate: int = Form(default=44100, ge=8000, le=96000),
     channels: int = Form(default=2, ge=1, le=2),
+    start_time: str | None = Form(default=None),
+    end_time: str | None = Form(default=None),
 ):
     """上传视频，创建转换任务（后台异步转换）"""
     # 1. 格式校验
@@ -92,6 +84,17 @@ async def create_conversion(
                 )
             f.write(chunk)
 
+    source_duration = get_duration(input_path)
+    try:
+        clip_start_seconds, clip_end_seconds = validate_clip_range(
+            start_time,
+            end_time,
+            source_duration=source_duration,
+        )
+    except ValueError as exc:
+        remove_file_if_exists(input_path)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
     # 3. 预生成输出路径
     output_dir = _get_output_dir()
     output_name = f"{uuid.uuid4().hex}.mp3"
@@ -109,6 +112,8 @@ async def create_conversion(
         bitrate=bitrate,
         sample_rate=sample_rate,
         channels=channels,
+        clip_start_seconds=clip_start_seconds,
+        clip_end_seconds=clip_end_seconds,
     )
     task_id = task.id
 
@@ -116,7 +121,17 @@ async def create_conversion(
     await db.commit()
 
     # 6. 添加后台任务
-    background_tasks.add_task(_run_conversion, task_id, input_path, output_path, bitrate, sample_rate, channels)
+    background_tasks.add_task(
+        _run_conversion,
+        task_id,
+        input_path,
+        output_path,
+        bitrate,
+        sample_rate,
+        channels,
+        clip_start_seconds,
+        clip_end_seconds,
+    )
 
     return task
 
@@ -128,6 +143,8 @@ async def _run_conversion(
     bitrate: str,
     sample_rate: int,
     channels: int,
+    clip_start_seconds: float | None = None,
+    clip_end_seconds: float | None = None,
 ):
     """后台转换任务——由 BackgroundTasks 调用"""
     from app.core.database import async_session_factory
@@ -145,7 +162,14 @@ async def _run_conversion(
 
             # 执行 FFmpeg 转换
             async for _ in convert_video_to_mp3(
-                task_id, input_path, output_path, bitrate, sample_rate, channels
+                task_id,
+                input_path,
+                output_path,
+                bitrate,
+                sample_rate,
+                channels,
+                clip_start_seconds,
+                clip_end_seconds,
             ):
                 pass  # 进度暂时不入库，后续可扩展 WebSocket
 
@@ -165,7 +189,7 @@ async def _run_conversion(
             await db.commit()
 
             # 转换成功后不再保留源视频；删除失败不影响已完成任务。
-            _remove_file_if_exists(input_path)
+            remove_file_if_exists(input_path)
 
         except ConversionError as e:
             await db.execute(
@@ -232,7 +256,7 @@ async def clear_tasks(
     await db.commit()
 
     for path in file_paths:
-        _remove_file_if_exists(path)
+        remove_file_if_exists(path)
 
     return {"deleted": len(tasks)}
 
@@ -281,8 +305,8 @@ async def delete_task(
     await db.delete(task)
     await db.commit()
 
-    _remove_file_if_exists(input_path)
-    _remove_file_if_exists(output_path)
+    remove_file_if_exists(input_path)
+    remove_file_if_exists(output_path)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

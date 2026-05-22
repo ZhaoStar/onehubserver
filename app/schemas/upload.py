@@ -33,6 +33,8 @@ class UploadCompleteRequest(BaseModel):
     bitrate: str = Field(default="192k", pattern=r"^\d+k$")
     sample_rate: int = Field(default=44100, ge=8000, le=96000)
     channels: int = Field(default=2, ge=1, le=2)
+    start_time: str | None = Field(default=None, description="截取开始时间，支持 SS / MM:SS / HH:MM:SS(.ms)")
+    end_time: str | None = Field(default=None, description="截取结束时间，支持 SS / MM:SS / HH:MM:SS(.ms)")
 
 
 class UploadStatusResponse(BaseModel):

@@ -32,6 +32,8 @@ class ConversionTask(Base, TimestampMixin):
     bitrate: Mapped[str] = mapped_column(String(16), nullable=False, default="192k", comment="音频比特率")
     sample_rate: Mapped[int] = mapped_column(Integer, nullable=False, default=44100, comment="采样率")
     channels: Mapped[int] = mapped_column(Integer, nullable=False, default=2, comment="声道数")
+    clip_start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True, comment="截取开始时间(秒)")
+    clip_end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True, comment="截取结束时间(秒)")
 
     # 结果信息
     duration: Mapped[float | None] = mapped_column(Float, nullable=True, comment="音频时长(秒)")

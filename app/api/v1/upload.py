@@ -18,6 +18,9 @@ from app.services.chunk_upload import get_chunk_manager
 from app.services.conversion import (
     create_conversion_task,
     _get_output_dir,
+    get_duration,
+    remove_file_if_exists,
+    validate_clip_range,
 )
 from app.core.config import get_settings
 
@@ -132,6 +135,16 @@ async def complete_upload(
 
     input_path, file_size, filename = result
     ext = session.ext
+    source_duration = get_duration(input_path)
+    try:
+        clip_start_seconds, clip_end_seconds = validate_clip_range(
+            body.start_time,
+            body.end_time,
+            source_duration=source_duration,
+        )
+    except ValueError as exc:
+        remove_file_if_exists(input_path)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     output_dir = _get_output_dir()
     output_name = f"{uuid.uuid4().hex}.mp3"
@@ -148,6 +161,8 @@ async def complete_upload(
         bitrate=body.bitrate,
         sample_rate=body.sample_rate,
         channels=body.channels,
+        clip_start_seconds=clip_start_seconds,
+        clip_end_seconds=clip_end_seconds,
     )
     task_id = task.id
     await db.commit()
@@ -155,6 +170,7 @@ async def complete_upload(
     background_tasks.add_task(
         _run_conversion, task_id, input_path, output_path,
         body.bitrate, body.sample_rate, body.channels,
+        clip_start_seconds, clip_end_seconds,
     )
 
     return task

@@ -15,6 +15,9 @@ class ConversionError(Exception):
     pass
 
 
+TIME_PART_PATTERN = re.compile(r"^\d+(?:\.\d+)?$")
+
+
 def _ensure_dir(path: str) -> Path:
     """确保目录存在（跨平台）"""
     p = Path(path)
@@ -28,6 +31,88 @@ def _get_input_dir() -> Path:
 
 def _get_output_dir() -> Path:
     return _ensure_dir(os.path.join(settings.UPLOAD_DIR, "mp3"))
+
+
+def remove_file_if_exists(path: str | None) -> None:
+    """尽力删除文件，不让文件系统异常影响主流程。"""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def parse_clip_time(value: str | None) -> float | None:
+    """解析截取时间，支持 SS / MM:SS / HH:MM:SS(.ms)。"""
+    if value is None:
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    parts = text.split(":")
+    if len(parts) > 3:
+        raise ValueError("时间格式不正确，请使用 SS、MM:SS 或 HH:MM:SS")
+
+    if any(not TIME_PART_PATTERN.fullmatch(part) for part in parts):
+        raise ValueError("时间格式不正确，请使用数字和冒号")
+
+    if len(parts) == 1:
+        seconds = float(parts[0])
+        if seconds < 0:
+            raise ValueError("时间不能为负数")
+        return seconds
+
+    if len(parts) == 2:
+        minutes = int(parts[0])
+        seconds = float(parts[1])
+        if seconds >= 60:
+            raise ValueError("秒数必须小于 60")
+        return minutes * 60 + seconds
+
+    hours = int(parts[0])
+    minutes = int(parts[1])
+    seconds = float(parts[2])
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError("分钟和秒数必须小于 60")
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def validate_clip_range(
+    start_time: str | None,
+    end_time: str | None,
+    source_duration: float | None = None,
+) -> tuple[float | None, float | None]:
+    """校验截取区间，并在已知源时长时自动收口结束时间。"""
+    clip_start = parse_clip_time(start_time)
+    clip_end = parse_clip_time(end_time)
+
+    if clip_end is not None and clip_end <= 0:
+        raise ValueError("结束时间必须大于 0")
+
+    if source_duration is not None and clip_start is not None and clip_start >= source_duration:
+        raise ValueError("开始时间必须小于视频总时长")
+
+    if source_duration is not None and clip_end is not None:
+        clip_end = min(clip_end, source_duration)
+
+    if clip_start is not None and clip_end is not None and clip_end <= clip_start:
+        raise ValueError("结束时间必须大于开始时间")
+
+    return clip_start, clip_end
+
+
+def _format_ffmpeg_time(value: float) -> str:
+    """把秒数转成 FFmpeg 更稳定接受的 HH:MM:SS.mmm。"""
+    total_ms = int(round(value * 1000))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, milliseconds = divmod(remainder, 1_000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
 
 
 async def _collect_stderr(
@@ -74,6 +159,19 @@ def _parse_time(stderr_text: str) -> float | None:
     return None
 
 
+def _resolve_target_duration(
+    source_duration: float | None,
+    clip_start_seconds: float | None,
+    clip_end_seconds: float | None,
+) -> float | None:
+    clip_start = clip_start_seconds or 0.0
+    if clip_end_seconds is not None:
+        return max(clip_end_seconds - clip_start, 0.001)
+    if source_duration is not None and clip_start_seconds is not None:
+        return max(source_duration - clip_start, 0.001)
+    return source_duration
+
+
 async def convert_video_to_mp3(
     task_id: int,
     input_path: str,
@@ -81,6 +179,8 @@ async def convert_video_to_mp3(
     bitrate: str = "192k",
     sample_rate: int = 44100,
     channels: int = 2,
+    clip_start_seconds: float | None = None,
+    clip_end_seconds: float | None = None,
 ) -> AsyncGenerator[float, None]:
     """
     使用 FFmpeg 将视频转为 MP3，异步迭代进度百分比。
@@ -90,9 +190,16 @@ async def convert_video_to_mp3(
     """
     ffmpeg = settings.get_ffmpeg_path()
 
-    cmd = [
-        ffmpeg,
-        "-i", input_path,          # 输入文件
+    cmd = [ffmpeg]
+    if clip_start_seconds is not None:
+        cmd.extend(["-ss", _format_ffmpeg_time(clip_start_seconds)])
+    cmd.extend(["-i", input_path])
+
+    target_duration = _resolve_target_duration(None, clip_start_seconds, clip_end_seconds)
+    if target_duration is not None:
+        cmd.extend(["-t", _format_ffmpeg_time(target_duration)])
+
+    cmd.extend([
         "-vn",                      # 去掉视频流
         "-b:a", bitrate,            # 音频比特率
         "-ar", str(sample_rate),    # 采样率
@@ -102,7 +209,7 @@ async def convert_video_to_mp3(
         "-progress", "pipe:1",      # 进度输出到 stdout（机器可读）
         "-nostats",                 # 不输出统计信息到 stderr
         output_path,
-    ]
+    ])
 
     # 跨平台: Windows 上需要设置 CREATE_NO_WINDOW 防止弹出控制台窗口。
     # asyncio 的 Unix 子进程实现不支持 creationflags，不能传 None/0。
@@ -133,7 +240,7 @@ async def convert_video_to_mp3(
         # ffmpeg -progress 输出格式:
         # out_time_ms=123456789
         match = re.search(r"out_time_ms=(\d+)", text)
-        duration = state["duration"]
+        duration = _resolve_target_duration(state["duration"], clip_start_seconds, clip_end_seconds)
         if match and duration:
             current_ms = int(match.group(1)) / 1_000_000
             pct = min(round(current_ms / duration * 100, 1), 99.9)
@@ -186,6 +293,8 @@ async def create_conversion_task(
     bitrate: str = "192k",
     sample_rate: int = 44100,
     channels: int = 2,
+    clip_start_seconds: float | None = None,
+    clip_end_seconds: float | None = None,
 ) -> ConversionTask:
     """创建转换任务记录（供 upload 和 convert 路由共用）"""
     task = ConversionTask(
@@ -199,6 +308,8 @@ async def create_conversion_task(
         bitrate=bitrate,
         sample_rate=sample_rate,
         channels=channels,
+        clip_start_seconds=clip_start_seconds,
+        clip_end_seconds=clip_end_seconds,
     )
     db.add(task)
     await db.flush()

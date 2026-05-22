@@ -9,6 +9,7 @@ from app.models.base import Base
 
 # 导入所有模型，确保它们被 Base.metadata 注册
 import app.models.user  # noqa: F401
+import app.models.conversion  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
