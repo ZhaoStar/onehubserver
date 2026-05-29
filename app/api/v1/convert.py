@@ -1,5 +1,6 @@
 import os
 import uuid
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Response, status
 from fastapi.responses import FileResponse
@@ -11,11 +12,14 @@ from app.models.conversion import ConversionTask
 from app.schemas.conversion import (
     ConversionTaskOut,
     ConversionTaskListOut,
+    RemoteConvertRequest,
 )
 from app.services.conversion import (
     convert_video_to_mp3,
     ConversionError,
+    DownloadError,
     create_conversion_task,
+    download_remote_video,
     _get_input_dir,
     _get_output_dir,
     get_duration,
@@ -129,6 +133,109 @@ async def create_conversion(
         bitrate,
         sample_rate,
         channels,
+        clip_start_seconds,
+        clip_end_seconds,
+    )
+
+    return task
+
+
+@router.post("/remote", response_model=ConversionTaskOut, status_code=status.HTTP_201_CREATED)
+async def create_remote_conversion(
+    db: DBSession,
+    current_user: CurrentUser,
+    background_tasks: BackgroundTasks,
+    body: RemoteConvertRequest,
+):
+    """远程 URL 直转 MP3 —— 下载远程视频后创建后台转换任务"""
+    # 0. URL 协议校验
+    parsed = urlparse(body.url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="仅支持 HTTP/HTTPS 链接",
+        )
+
+    # 1. 下载远程视频到临时文件
+    input_dir = _get_input_dir()
+    temp_path = os.path.join(str(input_dir), f"{uuid.uuid4().hex}.tmp")
+
+    try:
+        original_filename, ext, file_size = await download_remote_video(
+            url=body.url,
+            dest_path=temp_path,
+            max_size_bytes=settings.MAX_VIDEO_SIZE_MB * 1024 * 1024,
+        )
+    except DownloadError as exc:
+        remove_file_if_exists(temp_path)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        remove_file_if_exists(temp_path)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"下载远程视频失败: {str(exc)}",
+        )
+
+    # 2. 格式校验
+    if ext not in ALLOWED_EXTENSIONS:
+        remove_file_if_exists(temp_path)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"不支持的视频格式: .{ext}，支持: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
+
+    # 3. 重命名为带正确扩展名的路径
+    input_path = os.path.join(str(input_dir), f"{uuid.uuid4().hex}.{ext}")
+    os.rename(temp_path, input_path)
+
+    # 4. 获取时长并校验截取区间
+    source_duration = get_duration(input_path)
+    try:
+        clip_start_seconds, clip_end_seconds = validate_clip_range(
+            body.start_time,
+            body.end_time,
+            source_duration=source_duration,
+        )
+    except ValueError as exc:
+        remove_file_if_exists(input_path)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # 5. 预生成输出路径
+    output_dir = _get_output_dir()
+    output_name = f"{uuid.uuid4().hex}.mp3"
+    output_path = os.path.join(str(output_dir), output_name)
+
+    # 6. 创建任务记录
+    task = await create_conversion_task(
+        db=db,
+        user_id=current_user.id,
+        filename=original_filename,
+        ext=ext,
+        file_size=file_size,
+        input_path=input_path,
+        output_path=output_path,
+        bitrate=body.bitrate,
+        sample_rate=body.sample_rate,
+        channels=body.channels,
+        clip_start_seconds=clip_start_seconds,
+        clip_end_seconds=clip_end_seconds,
+    )
+
+    # 7. 提交数据库
+    await db.commit()
+
+    # 8. 添加后台转换任务
+    background_tasks.add_task(
+        _run_conversion,
+        task.id,
+        input_path,
+        output_path,
+        body.bitrate,
+        body.sample_rate,
+        body.channels,
         clip_start_seconds,
         clip_end_seconds,
     )

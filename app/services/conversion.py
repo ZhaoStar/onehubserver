@@ -3,6 +3,10 @@ import os
 import re
 from pathlib import Path
 from typing import AsyncGenerator
+from urllib.parse import urlparse
+
+import aiofiles
+import httpx
 
 from app.core.config import get_settings
 from app.models.conversion import ConversionTask
@@ -13,6 +17,90 @@ settings = get_settings()
 class ConversionError(Exception):
     """FFmpeg 转换异常"""
     pass
+
+
+class DownloadError(Exception):
+    """远程视频下载异常"""
+    pass
+
+
+CONTENT_TYPE_TO_EXT = {
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "video/x-msvideo": "avi",
+    "video/x-matroska": "mkv",
+    "video/x-flv": "flv",
+    "video/x-ms-wmv": "wmv",
+    "video/webm": "webm",
+    "video/x-m4v": "m4v",
+    "video/3gpp": "3gp",
+}
+
+
+async def download_remote_video(
+    url: str,
+    dest_path: str,
+    max_size_bytes: int,
+    timeout: int = 600,
+) -> tuple[str, str, int]:
+    """
+    从远程 URL 流式下载视频文件。
+
+    Returns:
+        (original_filename, extension, file_size)
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/91.0.4472.124 Safari/537.36"
+        ),
+    }
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+
+            # 从 Content-Type 检测扩展名
+            content_type = response.headers.get("content-type", "")
+            content_type = content_type.split(";")[0].strip().lower()
+            ext = CONTENT_TYPE_TO_EXT.get(content_type)
+
+            # 备选：从 URL 路径提取扩展名
+            if ext is None:
+                url_path = urlparse(url).path
+                if "." in url_path:
+                    url_ext = url_path.rsplit(".", 1)[-1].lower()
+                    if url_ext and len(url_ext) <= 6:
+                        ext = url_ext
+
+            if not ext:
+                raise DownloadError(
+                    "无法识别视频格式，请确认 URL 指向有效的视频文件"
+                )
+
+            # 从 URL 提取原始文件名
+            url_path = urlparse(url).path
+            raw_name = url_path.rsplit("/", 1)[-1] if "/" in url_path else url_path
+            if not raw_name or "." not in raw_name:
+                raw_name = f"video.{ext}"
+
+            # 流式写入磁盘
+            file_size = 0
+            chunk_size = 1024 * 1024  # 1MB
+            async with aiofiles.open(dest_path, "wb") as f:
+                async for chunk in response.aiter_bytes(chunk_size):
+                    file_size += len(chunk)
+                    if file_size > max_size_bytes:
+                        raise DownloadError(
+                            f"文件大小超过上限 {max_size_bytes // (1024 * 1024)}MB"
+                        )
+                    await f.write(chunk)
+
+            if file_size == 0:
+                raise DownloadError("下载的文件为空")
+
+            return raw_name, ext, file_size
 
 
 TIME_PART_PATTERN = re.compile(r"^\d+(?:\.\d+)?$")
