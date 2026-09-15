@@ -94,15 +94,27 @@ async def lifespan(app: FastAPI):
         )
     )
 
+    # 启动待办事项后台到期提醒巡检任务（每20秒巡检一次）
+    from app.services.todo_reminder import run_todo_reminder_loop
+    todo_reminder_task = asyncio.create_task(
+        run_todo_reminder_loop(interval_sec=20)
+    )
+
     yield
 
-    # 关闭时：停止清理任务 + 释放连接池
+    # 关闭时：停止清理任务与提醒任务 + 释放连接池
     cleanup_task.cancel()
+    todo_reminder_task.cancel()
     try:
         await cleanup_task
     except asyncio.CancelledError:
         pass
+    try:
+        await todo_reminder_task
+    except asyncio.CancelledError:
+        pass
     await engine.dispose()
+
 
 
 app = FastAPI(
