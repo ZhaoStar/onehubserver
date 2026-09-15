@@ -8,6 +8,14 @@ from app.models.todo import Todo
 from app.schemas.todo import TodoCreate, TodoStatsSummary, TodoUpdate
 
 
+def _normalize_dt(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
 class TodoService:
     @staticmethod
     async def create(db: AsyncSession, user_id: int, todo_in: TodoCreate) -> Todo:
@@ -17,8 +25,8 @@ class TodoService:
             description=todo_in.description,
             priority=todo_in.priority,
             status="pending",
-            due_time=todo_in.due_time,
-            remind_time=todo_in.remind_time,
+            due_time=_normalize_dt(todo_in.due_time),
+            remind_time=_normalize_dt(todo_in.remind_time),
             is_reminded=False,
         )
         db.add(todo)
@@ -130,8 +138,12 @@ class TodoService:
     async def update(db: AsyncSession, todo: Todo, todo_in: TodoUpdate) -> Todo:
         update_data = todo_in.model_dump(exclude_unset=True)
 
+        if "due_time" in update_data:
+            update_data["due_time"] = _normalize_dt(update_data["due_time"])
+
         # 如果修改了提醒时间且提醒时间晚于当前时间，重置 is_reminded 状态
         if "remind_time" in update_data:
+            update_data["remind_time"] = _normalize_dt(update_data["remind_time"])
             new_remind = update_data["remind_time"]
             if new_remind and new_remind > datetime.now():
                 todo.is_reminded = False

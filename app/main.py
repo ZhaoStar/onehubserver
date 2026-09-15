@@ -75,13 +75,12 @@ if settings.DOUYIN_API_ENABLE:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动/关闭时的生命周期"""
-    # 启动时：自动建表（仅开发环境，生产请用 alembic）
-    if settings.DEBUG:
-        try:
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-        except Exception as e:
-            logger.warning("数据库未启动或连接异常，已跳过自动建表: %s", e)
+    # 启动时：确保必要数据表已就绪（create_all 具有幂等性，已存在的表不会被修改）
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as e:
+        logger.warning("数据库未启动或检查建表异常，已跳过: %s", e)
 
     # 启动分块上传后台清理任务
     from app.services.chunk_upload import get_chunk_manager, run_cleanup_loop
