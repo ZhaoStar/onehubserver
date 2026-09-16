@@ -80,3 +80,52 @@ async def get_latest_version(
             "forceUpdate": is_force or version_info.get("forceUpdate", False),
         },
     }
+
+
+from fastapi import UploadFile, File, Form, HTTPException
+import time
+
+
+@router.post("/upload", summary="上传最新 APK 安装包与更新配置")
+async def upload_apk(
+    file: UploadFile = File(...),
+    version_name: Optional[str] = Form(None),
+    version_code: Optional[int] = Form(None),
+    update_log: Optional[str] = Form(None),
+    secret: str = Form(...),
+):
+    """安全上传最新版 APK 并自动更新 version.json"""
+    if secret != "onehub-apk-upload-secret-2026":
+        raise HTTPException(status_code=403, detail="上传密钥无效")
+
+    APK_DIR.mkdir(parents=True, exist_ok=True)
+    apk_target = APK_DIR / "onehubapp-latest.apk"
+    content = await file.read()
+    with open(apk_target, "wb") as f:
+        f.write(content)
+
+    size_mb = round(len(content) / (1024 * 1024), 1)
+
+    current_info = _load_version_info()
+    if version_name:
+        current_info["versionName"] = version_name
+    if version_code:
+        current_info["versionCode"] = int(version_code)
+    if update_log:
+        current_info["updateLog"] = update_log
+    current_info["fileSize"] = f"{size_mb}MB"
+    current_info["publishDate"] = time.strftime("%Y-%m-%d %H:%M")
+
+    with open(VERSION_FILE, "w", encoding="utf-8") as f:
+        json.dump(current_info, f, ensure_ascii=False, indent=2)
+
+    logger.info(f"成功更新 APK 文件 (大小: {size_mb}MB)")
+    return {
+        "code": 200,
+        "message": "APK 上传并发布成功",
+        "data": {
+            "fileSize": f"{size_mb}MB",
+            "versionName": current_info.get("versionName"),
+            "versionCode": current_info.get("versionCode"),
+        },
+    }
