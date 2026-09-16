@@ -7,6 +7,8 @@ from fastapi import APIRouter, Query
 
 logger = logging.getLogger(__name__)
 
+from fastapi.responses import FileResponse
+
 router = APIRouter(prefix="/app/version", tags=["App版本与在线更新"])
 
 # 存放 APK 与版本信息的静态目录路径
@@ -15,15 +17,44 @@ APK_DIR = STATIC_DIR / "apk"
 VERSION_FILE = APK_DIR / "version.json"
 
 DEFAULT_VERSION_INFO = {
-    "versionCode": 1,
-    "versionName": "1.0.0",
+    "versionCode": 2,
+    "versionName": "1.1.0",
     "minVersionCode": 1,
-    "downloadUrl": "https://api.onehubai.online/static/apk/onehubapp-latest.apk",
-    "fileSize": "30MB",
-    "updateLog": "1. 待办事项支持点击查看详情与修改提醒时间\n2. 接入全国及山东油价查询模块\n3. 优化界面交互与视觉质感",
-    "publishDate": "2026-09-16",
+    "downloadUrl": "https://api.onehubai.online/api/v1/app/version/download",
+    "fileSize": "19.0MB",
+    "updateLog": "1. 待办事项支持点击查看详情与直接修改提醒时间\n2. 接入全国及山东油价查询与调价预测模块\n3. 优化真我GT8 64位专属架构 (体积从50MB降至19MB)\n4. 全新极速验证码引擎",
+    "publishDate": "2026-09-16 16:20",
     "forceUpdate": False,
 }
+
+
+@router.get("/debug", summary="调试 APK 存放状态")
+def debug_apk():
+    apk_file = APK_DIR / "onehubapp-latest.apk"
+    return {
+        "static_dir": str(STATIC_DIR),
+        "apk_dir": str(APK_DIR),
+        "apk_exists": apk_file.exists(),
+        "apk_size": apk_file.stat().st_size if apk_file.exists() else 0,
+        "files": [f.name for f in APK_DIR.iterdir()] if APK_DIR.exists() else [],
+    }
+
+
+@router.get("/download", summary="下载最新版 APK 安装包")
+def download_latest_apk():
+    candidates = [
+        APK_DIR / "onehubapp-latest.apk",
+        STATIC_DIR / "apk" / "onehubapp-latest.apk",
+        Path("/root/onehubserver/static/apk/onehubapp-latest.apk"),
+    ]
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return FileResponse(
+                path=str(c),
+                filename="onehubapp-latest.apk",
+                media_type="application/vnd.android.package-archive",
+            )
+    raise HTTPException(status_code=404, detail="未找到 APK 文件，请重新上传")
 
 
 def _load_version_info() -> dict:
