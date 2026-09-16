@@ -1,7 +1,7 @@
 from datetime import datetime, time
 from typing import Sequence
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.todo import Todo
@@ -69,11 +69,16 @@ class TodoService:
         count_query = select(func.count()).select_from(query.subquery())
         total = (await db.execute(count_query)).scalar() or 0
 
-        # Order by: pending first, then remind_time / due_time asc (nulls last), then created_at desc
+        # Order by: status asc, then due_time asc (nulls last), then created_at desc
+        # 注意：MySQL 不支持 PostgreSQL/Oracle 的 `NULLS LAST` 语法，直接使用会抛出
+        # (1064, "You have an error in your SQL syntax ... near 'NULLS LAST'").
+        # 这里改用 CASE WHEN 显式构造排序键：due_time 为 NULL 记 1，非 NULL 记 0，
+        # 升序排列后即「非空在前、空值在后」，语义与 NULLS LAST 完全等价，且跨方言可用。
         query = (
             query.order_by(
                 Todo.status.asc(),
-                Todo.due_time.asc().nulls_last(),
+                case((Todo.due_time.is_(None), 1), else_=0).asc(),
+                Todo.due_time.asc(),
                 Todo.created_at.desc(),
             )
             .offset(skip)
