@@ -1,0 +1,10 @@
+{
+  "versionCode": 2,
+  "versionName": "1.0.1",
+  "minVersionCode": 1,
+  "downloadUrl": "https://api.onehubai.online/static/apk/onehubapp-latest.apk",
+  "fileSize": "30MB",
+  "updateLog": "1. 待办事项支持点击查看详情与直接修改提醒时间\n2. 接入全国及山东油价查询与调价预测模块\n3. 移除AI配置与用户管理模块，优化工作台布局\n4. 支持在线检测更新与一键覆盖安装",
+  "publishDate": "2026-09-16",
+  "forceUpdate": false
+}

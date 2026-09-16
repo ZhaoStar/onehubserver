@@ -169,6 +169,13 @@ from app.api.v1.router import router as v1_router
 
 app.include_router(v1_router)
 
+# 挂载静态资源目录 (供客户端直接下载 APK 与版本配置)
+from fastapi.staticfiles import StaticFiles
+STATIC_ROOT = Path(__file__).resolve().parent.parent / "static"
+STATIC_ROOT.mkdir(exist_ok=True)
+(STATIC_ROOT / "apk").mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(STATIC_ROOT)), name="static")
+
 # ========== 注册 Douyin/TikTok/Bilibili API 路由 ==========
 if settings.DOUYIN_API_ENABLE:
     try:
