@@ -1,5 +1,4 @@
-from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, status, Response
 
 from app.api.deps import DBSession, CurrentUser
 from app.schemas.user import (
@@ -17,13 +16,13 @@ router = APIRouter(prefix="/auth", tags=["认证"])
 
 
 @router.get("/captcha")
-async def get_captcha():
-    """获取图片验证码，返回 PNG 图片 + X-Captcha-Key 响应头"""
+def get_captcha():
+    """获取图片验证码，返回 PNG 图片 + X-Captcha-Key 响应头 (高效线程池处理)"""
     code = generate_code()
     key = store_code(code)
-    image_buf = generate_captcha_image(code)
-    return StreamingResponse(
-        image_buf,
+    image_bytes = generate_captcha_image(code)
+    return Response(
+        content=image_bytes,
         media_type="image/png",
         headers={"X-Captcha-Key": key, "Cache-Control": "no-cache, no-store"},
     )
