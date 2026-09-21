@@ -1,5 +1,6 @@
 import time
 import logging
+from datetime import date, timedelta
 from typing import Dict, Any, List, Optional
 import httpx
 
@@ -27,6 +28,38 @@ FALLBACK_OIL_LIST = [
     {"city": "重庆", "province": "重庆", "date": "2026-08-29", "p92": 8.15, "p95": 8.61, "p89": 7.58, "p0": 7.82, "change92": 0.31, "change95": 0.33, "change0": 0.31, "prev92": 7.84, "prev95": 8.28, "prev0": 7.51},
     {"city": "海南", "province": "海南", "date": "2026-08-29", "p92": 9.20, "p95": 9.77, "p89": 8.39, "p0": 7.84, "change92": 0.30, "change95": 0.32, "change0": 0.31, "prev92": 8.90, "prev95": 9.45, "prev0": 7.53}
 ]
+
+# 2026 年成品油调价窗口（当日 24:00 执行、次日零点生效），用于推算下一个调价日
+ADJUST_WINDOWS_2026 = [
+    "2026-09-11", "2026-09-25", "2026-10-16",
+    "2026-11-06", "2026-11-20", "2026-12-04", "2026-12-18"
+]
+
+def parse_date(value: Any) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+def resolve_next_adjust_window(cycle_start: str) -> str:
+    """按调价日历推算下一个调价窗口日，日历用尽时按 14 天周期顺延"""
+    start = parse_date(cycle_start)
+    if start:
+        for window in ADJUST_WINDOWS_2026:
+            window_date = parse_date(window)
+            if window_date and window_date > start:
+                return window
+        return (start + timedelta(days=13)).isoformat()
+    return ADJUST_WINDOWS_2026[0]
+
+def build_adjust_advice(est_tons: float, next_window: str) -> str:
+    window_date = parse_date(next_window)
+    label = f"{window_date.month}月{window_date.day}日" if window_date else next_window
+    if est_tons >= 50:
+        return f"本轮国际原油走高，国内油价预计上调。建议山东车主在 {label} 24:00 前加满油箱，提前锁定优惠！"
+    if est_tons <= -50:
+        return f"本轮国际原油回落，国内油价预计下调，建议等到 {label} 调价落地后再加油更划算。"
+    return "本轮国际原油波动未超过调价红线，预计搁浅，按需加油即可。"
 
 # 内存 TTL 缓存
 _prices_cache = {"data": None, "expires_at": 0}
@@ -72,32 +105,35 @@ async def get_national_oil_prices() -> Dict[str, Any]:
 
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     params = {
-        "reportName": "RPTA_WEB_JY_YJ",
+        "reportName": "RPTA_WEB_YJ_JH",
         "columns": "ALL",
         "sortColumns": "DIM_DATE",
         "sortTypes": "-1",
         "pageNumber": "1",
-        "pageSize": "35"
+        "pageSize": "40"
     }
 
     oil_list = []
-    updated_at = "2026-08-29"
+    updated_at = ""
+    data_source = "eastmoney"
 
     try:
-        async with httpx.AsyncClient(headers=EASTMONEY_HEADERS, timeout=6.0) as client:
+        async with httpx.AsyncClient(headers=EASTMONEY_HEADERS, timeout=8.0) as client:
             resp = await client.get(url, params=params)
             if resp.status_code == 200:
                 data = resp.json()
                 if data and data.get("success") and data.get("result"):
-                    raw_items = data["result"].get("data", [])
-                    seen = set()
-                    for item in raw_items:
+                    # 同一省份会返回多期历史数据，按省份只保留调价日期最新的一条
+                    latest_by_city: Dict[str, Dict[str, Any]] = {}
+                    for item in data["result"].get("data", []):
                         city = item.get("CITYNAME")
-                        if not city or city in seen:
+                        if not city:
                             continue
-                        seen.add(city)
-                        d_str = str(item.get("DIM_DATE", ""))[:10] or "2026-08-29"
-                        oil_list.append({
+                        d_str = str(item.get("DIM_DATE", ""))[:10]
+                        existed = latest_by_city.get(city)
+                        if existed and existed["date"] >= d_str:
+                            continue
+                        latest_by_city[city] = {
                             "city": city,
                             "province": city,
                             "date": d_str,
@@ -111,7 +147,8 @@ async def get_national_oil_prices() -> Dict[str, Any]:
                             "prev92": float(item.get("QE92") or 0),
                             "prev95": float(item.get("QE95") or 0),
                             "prev0": float(item.get("QE0") or 0)
-                        })
+                        }
+                    oil_list = sorted(latest_by_city.values(), key=lambda x: x["date"], reverse=True)
                     if oil_list:
                         updated_at = oil_list[0]["date"]
     except Exception as e:
@@ -119,10 +156,14 @@ async def get_national_oil_prices() -> Dict[str, Any]:
 
     if not oil_list:
         oil_list = list(FALLBACK_OIL_LIST)
+        updated_at = FALLBACK_OIL_LIST[0]["date"]
+        data_source = "fallback"
+        logger.warning("东方财富油价数据不可用，当前返回内置兜底数据，价格可能已过期")
 
     result = {
         "list": oil_list,
-        "updatedAt": updated_at,
+        "updatedAt": updated_at or FALLBACK_OIL_LIST[0]["date"],
+        "dataSource": data_source,
         "summary": compute_summary(oil_list)
     }
 
@@ -136,30 +177,41 @@ async def get_oil_prediction() -> Dict[str, Any]:
     if _prediction_cache["data"] and now < _prediction_cache["expires_at"]:
         return _prediction_cache["data"]
 
+    # 本周期起始日 = 最近一次调价执行日，直接取最新油价数据的日期，避免写死日期
+    prices = await get_national_oil_prices()
+    cycle_start = str(prices.get("updatedAt") or FALLBACK_OIL_LIST[0]["date"])
+    next_window = resolve_next_adjust_window(cycle_start)
+    window_date = parse_date(next_window)
+    next_adjustment = f"{next_window} 24:00"
+    next_effective = f"{(window_date + timedelta(days=1)).isoformat()} 00:00" if window_date else next_adjustment
+    current_92 = float(next((x.get("p92") for x in prices.get("list", []) if x.get("province") == "山东"), 0) or 0)
+
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     params = {
         "reportName": "RPTA_WEB_JY_HQ",
         "columns": "ALL",
         "sortColumns": "DATE",
         "sortTypes": "-1",
-        "pageSize": "15",
+        "pageSize": "40",
         "pageNumber": "1"
     }
 
     try:
-        async with httpx.AsyncClient(headers=EASTMONEY_HEADERS, timeout=6.0) as client:
+        async with httpx.AsyncClient(headers=EASTMONEY_HEADERS, timeout=8.0) as client:
             resp = await client.get(url, params=params)
             if resp.status_code == 200:
                 data = resp.json()
                 raw_quotes = data.get("result", {}).get("data", []) if data.get("success") else []
-                # 过滤本调价周期 (2026-08-28 之后)
-                cycle_quotes = [q for q in raw_quotes if q.get("DATE", "")[:10] >= "2026-08-28"]
+                all_quotes = sorted(raw_quotes, key=lambda x: str(x.get("DATE", "")))
+                # 只统计本调价周期（最近一次执行日之后）的三地原油收盘价
+                cycle_quotes = [q for q in all_quotes if str(q.get("DATE", ""))[:10] >= cycle_start]
+                if len(cycle_quotes) < 2:
+                    cycle_quotes = all_quotes[-5:]
                 if len(cycle_quotes) >= 2:
-                    sorted_quotes = sorted(cycle_quotes, key=lambda x: x.get("DATE", ""))
-                    base_price = float(sorted_quotes[0].get("CLOSE") or 83.44)
-                    recent_quotes = sorted_quotes[1:]
+                    base_price = float(cycle_quotes[0].get("CLOSE") or 0)
+                    recent_quotes = cycle_quotes[1:]
                     avg_recent = sum(float(q.get("CLOSE") or 0) for q in recent_quotes) / len(recent_quotes)
-                    rate = ((avg_recent - base_price) / base_price) * 100
+                    rate = ((avg_recent - base_price) / base_price) * 100 if base_price else 0.0
 
                     est_tons = round(rate * 36)
                     est_liter = round(est_tons * 0.00078, 2)
@@ -173,11 +225,12 @@ async def get_oil_prediction() -> Dict[str, Any]:
                         trend_status = "down"
                         trend_label = "预计大幅下调" if est_tons <= -200 else "预计小幅下调"
 
-                    working_day = min(10, len(recent_quotes) + 1)
+                    working_day = min(10, len(cycle_quotes))
 
                     prediction = {
-                        "nextAdjustmentDate": "2026-09-11 24:00",
-                        "nextEffectiveDate": "2026-09-12 00:00",
+                        "cycleStartDate": cycle_start,
+                        "nextAdjustmentDate": next_adjustment,
+                        "nextEffectiveDate": next_effective,
                         "workingDay": working_day,
                         "workingDayTotal": 10,
                         "baseCrude": round(base_price, 2),
@@ -190,13 +243,13 @@ async def get_oil_prediction() -> Dict[str, Any]:
                         "isExceedThreshold": abs(est_tons) >= 50,
                         "crudeDailyList": [
                             {"date": str(q.get("DATE", ""))[5:10], "close": float(q.get("CLOSE") or 0)}
-                            for q in sorted_quotes
+                            for q in cycle_quotes
                         ],
                         "shandongImpact": {
-                            "current92": 8.05,
-                            "predicted92": round(8.05 + est_liter, 2),
+                            "current92": current_92,
+                            "predicted92": round(current_92 + est_liter, 2),
                             "diffTank50L": round(est_liter * 50, 2),
-                            "advice": "本轮国际原油走高，国内油价预计上调。建议山东车主在 9月11日 24:00 前加满油箱，提前锁定优惠！" if est_liter > 0 else "本轮油价呈平稳或下调预期，建议按需加油。"
+                            "advice": build_adjust_advice(est_tons, next_window)
                         }
                     }
                     _prediction_cache["data"] = prediction
@@ -207,9 +260,10 @@ async def get_oil_prediction() -> Dict[str, Any]:
 
     # 兜底预测
     fallback_prediction = {
-        "nextAdjustmentDate": "2026-09-11 24:00",
-        "nextEffectiveDate": "2026-09-12 00:00",
-        "workingDay": 9,
+        "cycleStartDate": cycle_start,
+        "nextAdjustmentDate": next_adjustment,
+        "nextEffectiveDate": next_effective,
+        "workingDay": 1,
         "workingDayTotal": 10,
         "baseCrude": 83.44,
         "currentCrudeAvg": 91.77,
@@ -231,10 +285,10 @@ async def get_oil_prediction() -> Dict[str, Any]:
             {"date": "09-09", "close": 96.67}
         ],
         "shandongImpact": {
-            "current92": 8.05,
-            "predicted92": 8.33,
+            "current92": current_92,
+            "predicted92": round(current_92 + 0.28, 2),
             "diffTank50L": 14.00,
-            "advice": "本轮国际原油持续震荡走高，变化率远超调价红线。建议山东车主在 9月11日 24:00 前加满油箱，加满一箱 50L 预计可节省约 14 元！"
+            "advice": build_adjust_advice(360, next_window)
         }
     }
     _prediction_cache["data"] = fallback_prediction
