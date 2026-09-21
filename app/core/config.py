@@ -38,6 +38,10 @@ class Settings(BaseSettings):
         "https://www.onehubai.online",
     ]
 
+    # —————— App 版本发布（APK 上传） ——————
+    # 上传 APK 的密钥，只配置在服务器 .env 中，不要写进代码或提交到仓库
+    APK_UPLOAD_SECRET: str = ""
+
     # —————— 视频转 MP3 配置 ——————
     # FFmpeg 可执行文件路径（留空则自动探测）
     FFMPEG_PATH: str = ""

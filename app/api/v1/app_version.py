@@ -1,11 +1,15 @@
 import os
 import json
+import hmac
 import logging
 from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, Query
 
+from app.core.config import get_settings
+
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 from fastapi.responses import FileResponse
 
@@ -126,16 +130,33 @@ async def upload_apk(
     secret: str = Form(...),
 ):
     """安全上传最新版 APK 并自动更新 version.json"""
-    if secret != "onehub-apk-upload-secret-2026":
+    # 密钥只从 .env 读取：仓库是公开的，明文写死等于把发布接口交给所有人，
+    # 需要更换时只改 .env 即可，不用动代码、不用重新发版
+    expected = (settings.APK_UPLOAD_SECRET or "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="服务端未配置 APK 上传密钥，请在服务器 .env 中设置 APK_UPLOAD_SECRET",
+        )
+    if not hmac.compare_digest(secret.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=403, detail="上传密钥无效")
 
     APK_DIR.mkdir(parents=True, exist_ok=True)
     apk_target = APK_DIR / "onehubapp-latest.apk"
-    content = await file.read()
-    with open(apk_target, "wb") as f:
-        f.write(content)
+    # 边收边写，避免 20MB 安装包整块读进内存；先写临时文件再原子替换，
+    # 上传中断也不会把正在分发的线上 APK 弄坏
+    tmp_target = APK_DIR / "onehubapp-latest.apk.part"
+    total = 0
+    with open(tmp_target, "wb") as f:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            f.write(chunk)
+    os.replace(tmp_target, apk_target)
 
-    size_mb = round(len(content) / (1024 * 1024), 1)
+    size_mb = round(total / (1024 * 1024), 1)
 
     current_info = _load_version_info()
     if version_name:
